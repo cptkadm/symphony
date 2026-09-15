@@ -14,7 +14,7 @@ defmodule SymphonyElixir.Codex.WorkspaceGit do
   @max_message_bytes 20_000
   @max_output_bytes 8_000
 
-  @spec tool_name? term() :: boolean()
+  @spec tool_name?(term()) :: boolean()
   def tool_name?(tool), do: tool == @tool_name
 
   @spec tool_specs() :: [map()]
