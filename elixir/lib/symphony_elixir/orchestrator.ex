@@ -12,6 +12,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   @continuation_retry_delay_ms 1_000
   @failure_retry_base_ms 10_000
+  @max_failure_retry_attempts 1
   # Slightly above the dashboard render interval so "checking now…" can render.
   @poll_transition_render_delay_ms 20
   @empty_codex_totals %{
@@ -206,28 +207,38 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp handle_agent_down(:normal, state, issue_id, running_entry, session_id) do
-    if input_required_blocker?(running_entry) do
-      block_input_required_agent_down(state, issue_id, running_entry, session_id, :normal)
-    else
-      Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling active-state continuation check")
+    cond do
+      input_required_blocker?(running_entry) ->
+        block_input_required_agent_down(state, issue_id, running_entry, session_id, :normal)
 
-      state
-      |> complete_issue(issue_id)
-      |> schedule_issue_retry(issue_id, 1, %{
-        identifier: running_entry.identifier,
-        issue_url: running_entry.issue.url,
-        delay_type: :continuation,
-        worker_host: Map.get(running_entry, :worker_host),
-        workspace_path: Map.get(running_entry, :workspace_path)
-      })
+      terminal_turn_failure_blocker?(running_entry) ->
+        block_terminal_turn_failure_agent_down(state, issue_id, running_entry, session_id, :normal)
+
+      true ->
+        Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling active-state continuation check")
+
+        state
+        |> complete_issue(issue_id)
+        |> schedule_issue_retry(issue_id, 1, %{
+          identifier: running_entry.identifier,
+          issue_url: running_entry.issue.url,
+          delay_type: :continuation,
+          worker_host: Map.get(running_entry, :worker_host),
+          workspace_path: Map.get(running_entry, :workspace_path)
+        })
     end
   end
 
   defp handle_agent_down(reason, state, issue_id, running_entry, session_id) do
-    if input_required_blocker?(running_entry) do
-      block_input_required_agent_down(state, issue_id, running_entry, session_id, reason)
-    else
-      retry_agent_down(state, issue_id, running_entry, session_id, reason)
+    cond do
+      input_required_blocker?(running_entry) ->
+        block_input_required_agent_down(state, issue_id, running_entry, session_id, reason)
+
+      terminal_turn_failure_blocker?(running_entry) ->
+        block_terminal_turn_failure_agent_down(state, issue_id, running_entry, session_id, reason)
+
+      true ->
+        retry_agent_down(state, issue_id, running_entry, session_id, reason)
     end
   end
 
@@ -239,18 +250,34 @@ defmodule SymphonyElixir.Orchestrator do
     block_issue_from_entry(state, issue_id, running_entry, error)
   end
 
+  defp block_terminal_turn_failure_agent_down(state, issue_id, running_entry, session_id, reason) do
+    error = blocker_error(running_entry, "codex turn failed: #{inspect(reason)}")
+
+    Logger.warning("Agent task blocked after terminal Codex turn failure for issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} session_id=#{session_id}: #{error}")
+
+    block_issue_from_entry(state, issue_id, running_entry, error)
+  end
+
   defp retry_agent_down(state, issue_id, running_entry, session_id, reason) do
-    Logger.warning("Agent task exited for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}; scheduling retry")
+    if codex_transient_retry_limit_reached?(running_entry) do
+      error = "agent failed after #{@max_failure_retry_attempts} automatic retry: #{inspect(reason)}"
 
-    next_attempt = next_retry_attempt_from_running(running_entry)
+      Logger.warning("Agent task blocked after exhausting transient retry budget for issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} session_id=#{session_id}: #{error}")
 
-    schedule_issue_retry(state, issue_id, next_attempt, %{
-      identifier: running_entry.identifier,
-      issue_url: running_entry.issue.url,
-      error: "agent exited: #{inspect(reason)}",
-      worker_host: Map.get(running_entry, :worker_host),
-      workspace_path: Map.get(running_entry, :workspace_path)
-    })
+      block_issue_from_entry(state, issue_id, running_entry, error)
+    else
+      Logger.warning("Agent task exited for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}; scheduling retry")
+
+      next_attempt = next_retry_attempt_from_running(running_entry)
+
+      schedule_issue_retry(state, issue_id, next_attempt, %{
+        identifier: running_entry.identifier,
+        issue_url: running_entry.issue.url,
+        error: "agent exited: #{inspect(reason)}",
+        worker_host: Map.get(running_entry, :worker_host),
+        workspace_path: Map.get(running_entry, :workspace_path)
+      })
+    end
   end
 
   defp maybe_dispatch(%State{} = state) do
@@ -354,6 +381,12 @@ defmodule SymphonyElixir.Orchestrator do
           state
       end
     end
+  end
+
+  @doc false
+  @spec handle_agent_down_for_test(term(), term(), String.t(), map(), String.t()) :: term()
+  def handle_agent_down_for_test(reason, state, issue_id, running_entry, session_id) do
+    handle_agent_down(reason, state, issue_id, running_entry, session_id)
   end
 
   @doc false
@@ -612,26 +645,44 @@ defmodule SymphonyElixir.Orchestrator do
       identifier = Map.get(running_entry, :identifier, issue_id)
       session_id = running_entry_session_id(running_entry)
 
-      if input_required_blocker?(running_entry) do
-        error = blocker_error(running_entry, "stalled for #{elapsed_ms}ms after Codex requested operator input")
+      cond do
+        input_required_blocker?(running_entry) ->
+          error = blocker_error(running_entry, "stalled for #{elapsed_ms}ms after Codex requested operator input")
 
-        Logger.warning("Issue blocked: issue_id=#{issue_id} issue_identifier=#{identifier} session_id=#{session_id} elapsed_ms=#{elapsed_ms}; #{error}")
+          Logger.warning("Issue blocked: issue_id=#{issue_id} issue_identifier=#{identifier} session_id=#{session_id} elapsed_ms=#{elapsed_ms}; #{error}")
 
-        state
-        |> record_session_completion_totals(running_entry)
-        |> stop_and_block_issue(issue_id, running_entry, error)
-      else
-        Logger.warning("Issue stalled: issue_id=#{issue_id} issue_identifier=#{identifier} session_id=#{session_id} elapsed_ms=#{elapsed_ms}; restarting with backoff")
+          state
+          |> record_session_completion_totals(running_entry)
+          |> stop_and_block_issue(issue_id, running_entry, error)
 
-        next_attempt = next_retry_attempt_from_running(running_entry)
+        terminal_turn_failure_blocker?(running_entry) ->
+          error = blocker_error(running_entry, "stalled after terminal Codex turn failure")
 
-        state
-        |> terminate_running_issue(issue_id, false)
-        |> schedule_issue_retry(issue_id, next_attempt, %{
-          identifier: identifier,
-          issue_url: running_entry.issue.url,
-          error: "stalled for #{elapsed_ms}ms without codex activity"
-        })
+          state
+          |> record_session_completion_totals(running_entry)
+          |> stop_and_block_issue(issue_id, running_entry, error)
+
+        failure_retry_limit_reached?(running_entry) ->
+          error = "codex worker stalled after #{@max_failure_retry_attempts} automatic retry"
+
+          Logger.warning("Issue blocked after exhausting stall retry budget: issue_id=#{issue_id} issue_identifier=#{identifier} session_id=#{session_id} elapsed_ms=#{elapsed_ms}")
+
+          state
+          |> record_session_completion_totals(running_entry)
+          |> stop_and_block_issue(issue_id, running_entry, error)
+
+        true ->
+          Logger.warning("Issue stalled: issue_id=#{issue_id} issue_identifier=#{identifier} session_id=#{session_id} elapsed_ms=#{elapsed_ms}; restarting with backoff")
+
+          next_attempt = next_retry_attempt_from_running(running_entry)
+
+          state
+          |> terminate_running_issue(issue_id, false)
+          |> schedule_issue_retry(issue_id, next_attempt, %{
+            identifier: identifier,
+            issue_url: running_entry.issue.url,
+            error: "stalled for #{elapsed_ms}ms without codex activity"
+          })
       end
     else
       state
@@ -664,6 +715,25 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp input_required_blocker?(_running_entry), do: false
+
+  defp terminal_turn_failure_blocker?(running_entry) when is_map(running_entry) do
+    Map.get(running_entry, :last_codex_event) in [:turn_failed, :turn_cancelled]
+  end
+
+  defp terminal_turn_failure_blocker?(_running_entry), do: false
+
+  defp codex_transient_retry_limit_reached?(running_entry) when is_map(running_entry) do
+    Map.get(running_entry, :last_codex_event) in [:turn_ended_with_error, :startup_failed] and
+      Map.get(running_entry, :retry_attempt, 0) >= @max_failure_retry_attempts
+  end
+
+  defp codex_transient_retry_limit_reached?(_running_entry), do: false
+
+  defp failure_retry_limit_reached?(running_entry) when is_map(running_entry) do
+    Map.get(running_entry, :retry_attempt, 0) >= @max_failure_retry_attempts
+  end
+
+  defp failure_retry_limit_reached?(_running_entry), do: false
 
   defp input_required_completion_outcome(completion) when is_map(completion) do
     outcome = Map.get(completion, :outcome) || Map.get(completion, "outcome")
@@ -698,6 +768,8 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp codex_event_blocker_error(:turn_input_required), do: "codex turn requires operator input"
   defp codex_event_blocker_error(:approval_required), do: "codex turn requires approval"
+  defp codex_event_blocker_error(:turn_failed), do: "codex turn failed"
+  defp codex_event_blocker_error(:turn_cancelled), do: "codex turn interrupted or cancelled"
   defp codex_event_blocker_error(_event), do: nil
 
   defp completion_blocker_error(completion) do
