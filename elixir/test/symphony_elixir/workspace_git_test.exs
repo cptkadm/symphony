@@ -47,6 +47,7 @@ defmodule SymphonyElixir.Codex.WorkspaceGitTest do
   test "advertises only allowlisted workspace Git operations" do
     assert [spec] = WorkspaceGit.tool_specs()
     assert spec["name"] == "workspace_git"
+
     assert spec["inputSchema"]["properties"]["operation"]["enum"] == [
              "ensure_branch",
              "commit",
@@ -106,7 +107,7 @@ defmodule SymphonyElixir.Codex.WorkspaceGitTest do
   end
 
   test "refuses traversal staging and direct pushes of the default branch", %{
-    workspace: workspace,
+    workspace: _workspace,
     issue: issue
   } do
     invalid_paths =

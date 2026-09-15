@@ -320,7 +320,10 @@ defmodule SymphonyElixir.Codex.WorkspaceGit do
   defp error_payload(:invalid_operation), do: %{"message" => "`workspace_git.operation` must be ensure_branch, commit, or push."}
   defp error_payload({:invalid_string, key}), do: %{"message" => "`workspace_git.#{key}` is missing or invalid."}
   defp error_payload(:commit_message_too_large), do: %{"message" => "Commit message exceeds the workspace Git safety limit."}
-  defp error_payload(:invalid_paths), do: %{"message" => "`workspace_git.paths` must contain explicit safe repository-relative literal paths; `.`, `.git`, traversal, and pathspec magic are forbidden."}
+
+  defp error_payload(:invalid_paths),
+    do: %{"message" => "`workspace_git.paths` must contain explicit safe repository-relative literal paths; `.`, `.git`, traversal, and pathspec magic are forbidden."}
+
   defp error_payload(:invalid_branch), do: %{"message" => "Branch name is not a valid Git branch."}
   defp error_payload(:detached_head), do: %{"message" => "Workspace is in detached HEAD state."}
   defp error_payload(:nothing_to_commit), do: %{"message" => "No staged changes remain after adding the requested paths."}
