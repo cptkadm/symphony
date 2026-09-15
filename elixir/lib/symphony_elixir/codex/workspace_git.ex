@@ -13,6 +13,7 @@ defmodule SymphonyElixir.Codex.WorkspaceGit do
   @operations ["ensure_branch", "commit", "push"]
   @max_message_bytes 20_000
   @max_output_bytes 8_000
+  @no_hooks ["-c", "core.hooksPath=/dev/null"]
 
   @spec tool_name?(term()) :: boolean()
   def tool_name?(tool), do: tool == @tool_name
@@ -80,17 +81,18 @@ defmodule SymphonyElixir.Codex.WorkspaceGit do
           {:ok, %{"operation" => "ensure_branch", "branch" => branch, "changed" => false}}
 
         local_branch?(workspace, branch) ->
-          with {:ok, _output} <- git(workspace, ["switch", branch]) do
+          with {:ok, _output} <- git(workspace, @no_hooks ++ ["switch", branch]) do
             {:ok, %{"operation" => "ensure_branch", "branch" => branch, "changed" => true}}
           end
 
         remote_tracking_branch?(workspace, branch) ->
-          with {:ok, _output} <- git(workspace, ["switch", "--track", "-c", branch, "origin/#{branch}"]) do
+          with {:ok, _output} <-
+                 git(workspace, @no_hooks ++ ["switch", "--track", "-c", branch, "origin/#{branch}"]) do
             {:ok, %{"operation" => "ensure_branch", "branch" => branch, "changed" => true}}
           end
 
         true ->
-          with {:ok, _output} <- git(workspace, ["switch", "-c", branch]) do
+          with {:ok, _output} <- git(workspace, @no_hooks ++ ["switch", "-c", branch]) do
             {:ok, %{"operation" => "ensure_branch", "branch" => branch, "changed" => true}}
           end
       end
@@ -103,7 +105,10 @@ defmodule SymphonyElixir.Codex.WorkspaceGit do
          {:ok, _output} <- git(workspace, ["--literal-pathspecs", "add", "--" | paths]),
          :ok <- ensure_staged_changes(workspace),
          {:ok, output} <-
-           git(workspace, ["-c", "core.hooksPath=/dev/null", "commit", "-m", message]),
+           git(
+             workspace,
+             @no_hooks ++ ["-c", "commit.gpgSign=false", "commit", "-m", message]
+           ),
          {:ok, commit} <- git(workspace, ["rev-parse", "HEAD"]) do
       {:ok,
        %{
@@ -120,7 +125,10 @@ defmodule SymphonyElixir.Codex.WorkspaceGit do
          :ok <- validate_branch(workspace, branch),
          :ok <- reject_default_branch_push(workspace, branch),
          {:ok, output} <-
-           git(workspace, ["push", "--set-upstream", "origin", "HEAD:refs/heads/#{branch}"]) do
+           git(
+             workspace,
+             @no_hooks ++ ["push", "--set-upstream", "origin", "HEAD:refs/heads/#{branch}"]
+           ) do
       {:ok,
        %{
          "operation" => "push",
