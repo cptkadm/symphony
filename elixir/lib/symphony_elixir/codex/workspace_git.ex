@@ -45,7 +45,7 @@ defmodule SymphonyElixir.Codex.WorkspaceGit do
             },
             "message" => %{
               "type" => ["string", "null"],
-              "description" => "Commit message for `commit`."
+              "description" => "Commit message for `commit`; multiline messages are allowed."
             },
             "paths" => %{
               "type" => ["array", "null"],
@@ -72,7 +72,7 @@ defmodule SymphonyElixir.Codex.WorkspaceGit do
   end
 
   defp execute_operation("ensure_branch", arguments, workspace) do
-    with {:ok, branch} <- required_string(arguments, "branch"),
+    with {:ok, branch} <- branch_argument(arguments),
          :ok <- validate_branch(workspace, branch),
          {:ok, current} <- current_branch(workspace) do
       cond do
@@ -100,7 +100,7 @@ defmodule SymphonyElixir.Codex.WorkspaceGit do
   defp execute_operation("commit", arguments, workspace) do
     with {:ok, message} <- commit_message(arguments),
          {:ok, paths} <- commit_paths(arguments),
-         {:ok, _output} <- git(workspace, ["add", "--" | paths]),
+         {:ok, _output} <- git(workspace, ["--literal-pathspecs", "add", "--" | paths]),
          :ok <- ensure_staged_changes(workspace),
          {:ok, output} <-
            git(workspace, ["-c", "core.hooksPath=/dev/null", "commit", "-m", message]),
@@ -164,29 +164,36 @@ defmodule SymphonyElixir.Codex.WorkspaceGit do
 
   defp operation(_arguments), do: {:error, :invalid_arguments}
 
-  defp required_string(arguments, key) when is_map(arguments) do
-    case Map.get(arguments, key) do
+  defp branch_argument(arguments) when is_map(arguments) do
+    case Map.get(arguments, "branch") do
       value when is_binary(value) ->
-        trimmed = String.trim(value)
+        branch = String.trim(value)
 
-        if trimmed != "" and not String.contains?(trimmed, ["\n", "\r", <<0>>]) do
-          {:ok, trimmed}
+        if branch != "" and not String.starts_with?(branch, "-") and
+             not String.contains?(branch, ["\n", "\r", <<0>>]) do
+          {:ok, branch}
         else
-          {:error, {:invalid_string, key}}
+          {:error, {:invalid_string, "branch"}}
         end
 
       _ ->
-        {:error, {:invalid_string, key}}
+        {:error, {:invalid_string, "branch"}}
     end
   end
 
-  defp commit_message(arguments) do
-    with {:ok, message} <- required_string(arguments, "message"),
-         true <- byte_size(message) <= @max_message_bytes do
-      {:ok, message}
-    else
-      false -> {:error, :commit_message_too_large}
-      {:error, reason} -> {:error, reason}
+  defp commit_message(arguments) when is_map(arguments) do
+    case Map.get(arguments, "message") do
+      message when is_binary(message) ->
+        message = String.trim(message)
+
+        cond do
+          message == "" or String.contains?(message, <<0>>) -> {:error, {:invalid_string, "message"}}
+          byte_size(message) > @max_message_bytes -> {:error, :commit_message_too_large}
+          true -> {:ok, message}
+        end
+
+      _ ->
+        {:error, {:invalid_string, "message"}}
     end
   end
 
@@ -206,6 +213,7 @@ defmodule SymphonyElixir.Codex.WorkspaceGit do
 
   defp safe_relative_path?(path) when is_binary(path) do
     path != "" and path != "." and Path.type(path) == :relative and
+      not String.starts_with?(path, ":") and
       not String.contains?(path, ["\n", "\r", <<0>>]) and
       ".." not in Path.split(path) and ".git" not in Path.split(path)
   end
@@ -302,9 +310,9 @@ defmodule SymphonyElixir.Codex.WorkspaceGit do
   defp error_payload({:invalid_workspace, reason}), do: %{"message" => "The current issue workspace is invalid.", "reason" => inspect(reason)}
   defp error_payload(:invalid_arguments), do: %{"message" => "`workspace_git` expects a JSON object."}
   defp error_payload(:invalid_operation), do: %{"message" => "`workspace_git.operation` must be ensure_branch, commit, or push."}
-  defp error_payload({:invalid_string, key}), do: %{"message" => "`workspace_git.#{key}` must be a non-empty single-line string."}
+  defp error_payload({:invalid_string, key}), do: %{"message" => "`workspace_git.#{key}` is missing or invalid."}
   defp error_payload(:commit_message_too_large), do: %{"message" => "Commit message exceeds the workspace Git safety limit."}
-  defp error_payload(:invalid_paths), do: %{"message" => "`workspace_git.paths` must contain explicit safe repository-relative paths; `.` and `.git` are forbidden."}
+  defp error_payload(:invalid_paths), do: %{"message" => "`workspace_git.paths` must contain explicit safe repository-relative literal paths; `.`, `.git`, traversal, and pathspec magic are forbidden."}
   defp error_payload(:invalid_branch), do: %{"message" => "Branch name is not a valid Git branch."}
   defp error_payload(:detached_head), do: %{"message" => "Workspace is in detached HEAD state."}
   defp error_payload(:nothing_to_commit), do: %{"message" => "No staged changes remain after adding the requested paths."}
