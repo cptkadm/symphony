@@ -121,16 +121,7 @@ defmodule SymphonyElixir.Codex.AppServer do
 
           {:error, reason} ->
             Logger.warning("Codex session ended with error for #{issue_context(issue)} session_id=#{session_id}: #{inspect(reason)}")
-
-            emit_message(
-              on_message,
-              :turn_ended_with_error,
-              %{
-                session_id: session_id,
-                reason: reason
-              },
-              metadata
-            )
+            maybe_emit_turn_ended_with_error(on_message, session_id, reason, metadata)
 
             {:error, reason}
         end
@@ -141,6 +132,26 @@ defmodule SymphonyElixir.Codex.AppServer do
         {:error, reason}
     end
   end
+
+  defp maybe_emit_turn_ended_with_error(on_message, session_id, reason, metadata) do
+    unless explicit_terminal_turn_error?(reason) do
+      emit_message(
+        on_message,
+        :turn_ended_with_error,
+        %{
+          session_id: session_id,
+          reason: reason
+        },
+        metadata
+      )
+    end
+  end
+
+  defp explicit_terminal_turn_error?({kind, _details})
+       when kind in [:turn_failed, :turn_cancelled, :turn_input_required, :approval_required],
+       do: true
+
+  defp explicit_terminal_turn_error?(_reason), do: false
 
   @spec stop_session(session()) :: :ok
   def stop_session(%{port: port}) when is_port(port) do
@@ -405,8 +416,35 @@ defmodule SymphonyElixir.Codex.AppServer do
 
     case Jason.decode(payload_string) do
       {:ok, %{"method" => "turn/completed"} = payload} ->
-        emit_turn_event(on_message, :turn_completed, payload, payload_string, port, payload)
-        {:ok, :turn_completed}
+        case turn_completion_status(payload) do
+          "failed" ->
+            emit_turn_event(
+              on_message,
+              :turn_failed,
+              payload,
+              payload_string,
+              port,
+              Map.get(payload, "params")
+            )
+
+            {:error, {:turn_failed, Map.get(payload, "params")}}
+
+          "interrupted" ->
+            emit_turn_event(
+              on_message,
+              :turn_cancelled,
+              payload,
+              payload_string,
+              port,
+              Map.get(payload, "params")
+            )
+
+            {:error, {:turn_cancelled, Map.get(payload, "params")}}
+
+          _ ->
+            emit_turn_event(on_message, :turn_completed, payload, payload_string, port, payload)
+            {:ok, :turn_completed}
+        end
 
       {:ok, %{"method" => "turn/failed", "params" => _} = payload} ->
         emit_turn_event(
@@ -476,6 +514,15 @@ defmodule SymphonyElixir.Codex.AppServer do
         receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests)
     end
   end
+
+  defp turn_completion_status(payload) when is_map(payload) do
+    case get_in(payload, ["params", "turn", "status"]) do
+      status when is_binary(status) -> String.downcase(status)
+      _ -> nil
+    end
+  end
+
+  defp turn_completion_status(_payload), do: nil
 
   defp emit_turn_event(on_message, event, payload, payload_string, port, payload_details) do
     emit_message(
