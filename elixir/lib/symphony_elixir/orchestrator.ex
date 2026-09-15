@@ -259,7 +259,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp retry_agent_down(state, issue_id, running_entry, session_id, reason) do
-    if failure_retry_limit_reached?(running_entry) do
+    if codex_transient_retry_limit_reached?(running_entry) do
       error = "agent failed after #{@max_failure_retry_attempts} automatic retry: #{inspect(reason)}"
 
       Logger.warning("Agent task blocked after exhausting transient retry budget for issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} session_id=#{session_id}: #{error}")
@@ -721,6 +721,13 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp terminal_turn_failure_blocker?(_running_entry), do: false
+
+  defp codex_transient_retry_limit_reached?(running_entry) when is_map(running_entry) do
+    Map.get(running_entry, :last_codex_event) in [:turn_ended_with_error, :startup_failed] and
+      Map.get(running_entry, :retry_attempt, 0) >= @max_failure_retry_attempts
+  end
+
+  defp codex_transient_retry_limit_reached?(_running_entry), do: false
 
   defp failure_retry_limit_reached?(running_entry) when is_map(running_entry) do
     Map.get(running_entry, :retry_attempt, 0) >= @max_failure_retry_attempts
