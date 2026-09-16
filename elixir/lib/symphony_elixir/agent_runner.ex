@@ -1,11 +1,11 @@
 defmodule SymphonyElixir.AgentRunner do
   @moduledoc """
-  Executes a single tracker work item in its workspace with Codex.
+  Executes a single tracker work item in its owned workspace through a worker adapter.
   """
 
   require Logger
-  alias SymphonyElixir.Codex.AppServer
-  alias SymphonyElixir.{Config, PromptBuilder, Tracker, Workspace}
+  alias SymphonyElixir.Worker.Result
+  alias SymphonyElixir.{Config, PromptBuilder, Tracker, Worker, Workspace}
   alias SymphonyElixir.Tracker.Issue
 
   @type worker_host :: String.t() | nil
@@ -34,6 +34,9 @@ defmodule SymphonyElixir.AgentRunner do
       :ok ->
         :ok
 
+      {:error, %Result{} = result} ->
+        raise RuntimeError, "Agent run failed for #{issue_context(issue)}: #{result.class}"
+
       {:error, reason} ->
         Logger.error("Agent run failed for #{issue_context(issue)}: #{inspect(reason)}")
         raise RuntimeError, "Agent run failed for #{issue_context(issue)}: #{inspect(reason)}"
@@ -46,7 +49,14 @@ defmodule SymphonyElixir.AgentRunner do
 
     try do
       with :ok <- Workspace.run_before_run_hook(workspace, issue, worker_host) do
-        run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host)
+        result = run_worker_turns(workspace, issue, codex_update_recipient, opts, worker_host)
+
+        case result do
+          {:error, %Result{} = terminal} -> send_worker_result(codex_update_recipient, issue, terminal)
+          _ -> :ok
+        end
+
+        result
       end
     after
       Workspace.run_after_run_hook(workspace, issue, worker_host)
@@ -61,7 +71,7 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp send_codex_update(recipient, %Issue{id: issue_id}, message)
        when is_binary(issue_id) and is_pid(recipient) do
-    send(recipient, {:codex_worker_update, issue_id, message})
+    send(recipient, {:worker_update, issue_id, self(), message})
     :ok
   end
 
@@ -83,57 +93,66 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp send_worker_runtime_info(_recipient, _issue, _worker_host, _workspace), do: :ok
 
-  defp run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host) do
-    max_turns = Keyword.get(opts, :max_turns, Config.settings!().agent.max_turns)
-    issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issues_by_ids/1)
+  defp send_worker_result(recipient, %Issue{id: id}, result) when is_pid(recipient) do
+    send(recipient, {:worker_result, id, self(), result})
+  end
 
-    with {:ok, session} <- AppServer.start_session(workspace, worker_host: worker_host) do
+  defp send_worker_result(_, _, _), do: :ok
+
+  defp run_worker_turns(workspace, issue, recipient, opts, worker_host) do
+    adapter = Keyword.get(opts, :worker_adapter, Worker.adapter())
+    max_turns = Keyword.get(opts, :max_turns, Config.settings!().agent.max_turns)
+    fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issues_by_ids/1)
+
+    context = %{
+      workspace: workspace,
+      issue: issue,
+      worker_host: worker_host,
+      branch: Keyword.get(opts, :branch),
+      prompt: build_turn_prompt(issue, opts, 1, max_turns),
+      turn: 1,
+      max_turns: max_turns
+    }
+
+    if is_pid(recipient) do
+      send(recipient, {:worker_identity, issue.id, self(), adapter.identity(), adapter.capabilities()})
+    end
+
+    with {:ok, handle} <- Worker.start(adapter, context) do
       try do
-        do_run_codex_turns(session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, 1, max_turns)
+        do_run_worker_turns(adapter, handle, context, recipient, opts, fetcher)
       after
-        AppServer.stop_session(session)
+        adapter.stop(handle)
       end
     end
   end
 
-  defp do_run_codex_turns(app_session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, turn_number, max_turns) do
-    prompt = build_turn_prompt(issue, opts, turn_number, max_turns)
+  defp do_run_worker_turns(adapter, handle, context, recipient, opts, fetcher) do
+    result = Worker.run(adapter, handle, context, codex_message_handler(recipient, context.issue))
 
-    with {:ok, turn_session} <-
-           AppServer.run_turn(
-             app_session,
-             prompt,
-             issue,
-             on_message: codex_message_handler(codex_update_recipient, issue)
-           ) do
-      Logger.info("Completed agent run for #{issue_context(issue)} session_id=#{turn_session[:session_id]} workspace=#{workspace} turn=#{turn_number}/#{max_turns}")
+    case result do
+      %Result{class: :success} ->
+        continue_worker(adapter, handle, context, recipient, opts, fetcher, result)
 
-      case continue_with_issue?(issue, issue_state_fetcher) do
-        {:continue, refreshed_issue} when turn_number < max_turns ->
-          Logger.info("Continuing agent run for #{issue_context(refreshed_issue)} after normal turn completion turn=#{turn_number}/#{max_turns}")
+      %Result{} ->
+        {:error, result}
+    end
+  end
 
-          do_run_codex_turns(
-            app_session,
-            workspace,
-            refreshed_issue,
-            codex_update_recipient,
-            opts,
-            issue_state_fetcher,
-            turn_number + 1,
-            max_turns
-          )
+  defp continue_worker(adapter, handle, context, recipient, opts, fetcher, result) do
+    case continue_with_issue?(context.issue, fetcher) do
+      {:continue, issue} when context.turn < context.max_turns ->
+        turn = context.turn + 1
+        prompt_turn = if adapter.capabilities().conversation, do: turn, else: 1
+        next = %{context | issue: issue, turn: turn, prompt: build_turn_prompt(issue, opts, prompt_turn, context.max_turns)}
+        do_run_worker_turns(adapter, handle, next, recipient, opts, fetcher)
 
-        {:continue, refreshed_issue} ->
-          Logger.info("Reached agent.max_turns for #{issue_context(refreshed_issue)} with issue still active; returning control to orchestrator")
+      {:error, reason} ->
+        {:error, reason}
 
-          :ok
-
-        {:done, _refreshed_issue} ->
-          :ok
-
-        {:error, reason} ->
-          {:error, reason}
-      end
+      _ ->
+        send_worker_result(recipient, context.issue, result)
+        :ok
     end
   end
 

@@ -269,7 +269,7 @@ defmodule SymphonyElixir.GitHub.LiveE2ETest do
       when is_binary(workspace_path) ->
         runtime_info
 
-      {:codex_worker_update, ^issue_id, _message} ->
+      {:worker_update, ^issue_id, _, _message} ->
         receive_runtime_info!(issue_id)
     after
       5_000 ->
@@ -279,10 +279,10 @@ defmodule SymphonyElixir.GitHub.LiveE2ETest do
 
   defp completed_github_tool_calls(issue_id, calls \\ []) do
     receive do
-      {:codex_worker_update, ^issue_id, %{event: :tool_call_completed, payload: %{"params" => params}}} ->
+      {:worker_update, ^issue_id, _, %{event: :tool_call_completed, payload: %{"params" => params}}} ->
         completed_github_tool_calls(issue_id, [params | calls])
 
-      {:codex_worker_update, ^issue_id, _message} ->
+      {:worker_update, ^issue_id, _, _message} ->
         completed_github_tool_calls(issue_id, calls)
     after
       0 ->
