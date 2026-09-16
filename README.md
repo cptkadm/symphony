@@ -10,6 +10,9 @@ _In this [demo video](https://player.vimeo.com/video/1186371009?h=5626e4b899), S
 > [!WARNING]
 > Symphony is a low-key engineering preview for testing in trusted environments.
 
+The Elixir implementation acquires OS-backed workspace ownership before running hooks or agents,
+so competing Symphony processes cannot write the same issue workspace concurrently.
+
 ## Running Symphony
 
 ### Requirements

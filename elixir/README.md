@@ -15,7 +15,7 @@ This directory contains the current Elixir/OTP implementation of Symphony, based
 
 1. Polls the configured tracker for candidate work (included adapters: Linear, GitHub Issues, Jira
    Cloud, Asana, and GitLab)
-2. Creates a workspace per issue
+2. Acquires exclusive OS ownership and creates a workspace per issue
 3. Launches Codex in [App Server mode](https://developers.openai.com/codex/app-server/) inside the
    workspace
 4. Sends a workflow prompt to Codex
@@ -34,6 +34,21 @@ If Codex reports that operator input, approval, or MCP elicitation is required, 
 issue claimed and exposes it as blocked in the runtime state, JSON API, and dashboard. Blocked
 entries are in memory only; restarting the orchestrator clears that blocked map, so any still-active
 tracker issue can become a dispatch candidate again after restart.
+
+Workspace ownership spans preparation, lifecycle hooks, all Codex turns, and cleanup. Competing
+processes fail closed and log the current owner's issue, canonical path, PID, host, instance ID,
+and acquisition time. They enter the existing failure/retry flow without launching hooks or Codex.
+Different workspaces remain concurrent. Workflow reloads do not change an active attempt's path.
+
+Locks use Python's `fcntl.flock` on the execution host (including SSH workers). The sibling
+`.symphony-locks` directory contains persistent lock inodes and diagnostic metadata; never delete
+it while Symphony or its child commands are running. Metadata alone never grants ownership.
+Normal release and process death permit automatic reacquisition once active commands exit.
+A separate activity lock prevents takeover while an old hook or app-server is still running.
+Hooks must keep workspace-writing subprocesses in their foreground lifetime; detached programs
+that close inherited descriptors cannot be tracked. Stop older, lock-unaware Symphony binaries
+before upgrading. Use a local filesystem with working `flock`; shared/network filesystems require
+independent verification of cross-host lock semantics.
 
 ## How to use it
 
@@ -54,6 +69,9 @@ tracker issue can become a dispatch candidate again after restart.
 6. Follow the instructions below to install the required runtime dependencies and start the service.
 
 ## Prerequisites
+
+Python 3 with the standard `fcntl` module and Bash must be available on every execution host.
+A missing or broken lock helper denies the attempt before workspace mutation.
 
 We recommend using [mise](https://mise.jdx.dev/) to manage Elixir/Erlang versions.
 
@@ -78,7 +96,7 @@ mise exec -- ./bin/symphony ./WORKFLOW.md
 
 Symphony ships self-contained executables built with
 [Burrito](https://github.com/burrito-elixir/burrito). They embed Erlang/OTP, Elixir, and Symphony,
-but still expect `codex`, `git`, and the selected tracker credentials on the target machine.
+but still expect `python3`, `bash`, `codex`, `git`, and the selected tracker credentials on the target machine.
 
 Supported release targets:
 

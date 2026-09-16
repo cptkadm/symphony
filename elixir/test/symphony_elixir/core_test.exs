@@ -1736,6 +1736,10 @@ defmodule SymphonyElixir.CoreTest do
       printf 'ARGV:%s\\n' "$*" >> "$trace_file"
 
       case "$*" in
+        *orchestrator_instance_id*)
+          printf '%s\\n' '{"status":"acquired","owner":{"workspace_path":"/remote/home/.symphony-remote-workspaces/MT-SSH-FAILOVER","attempt_id":"ssh-test"}}'
+          read -r release
+          ;;
         *worker-a*"__SYMPHONY_WORKSPACE__"*)
           printf '%s\\n' 'worker-a prepare failed' >&2
           exit 75

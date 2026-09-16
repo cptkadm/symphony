@@ -1629,6 +1629,10 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       printf 'ARGV:%s\\n' "$*" >> "$trace_file"
 
       case "$*" in
+        *orchestrator_instance_id*)
+          printf '%s\\n' '{"status":"acquired","owner":{"workspace_path":"#{workspace_path}","attempt_id":"ssh-test"}}'
+          read -r release
+          ;;
         *"__SYMPHONY_WORKSPACE__"*)
           printf '%s\\t%s\\t%s\\n' '__SYMPHONY_WORKSPACE__' '1' '#{workspace_path}'
           ;;
