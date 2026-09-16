@@ -4,6 +4,7 @@ defmodule SymphonyElixir.Worker.CodexTelemetry do
   @spec normalize(map()) :: map()
   def normalize(update) do
     usage = extract_token_usage(update)
+
     update
     |> Map.put(:worker_usage, %{input: get_token_usage(usage, :input), output: get_token_usage(usage, :output), total: get_token_usage(usage, :total)})
     |> Map.put(:worker_quota, extract_rate_limits(update))

@@ -155,7 +155,9 @@ defmodule SymphonyElixir.Orchestrator do
         {entry, delta} = integrate_codex_update(entry, update)
         state = state |> apply_codex_token_delta(delta) |> apply_codex_rate_limits(update)
         {:noreply, %{state | running: Map.put(state.running, issue_id, entry)}}
-      _ -> {:noreply, state}
+
+      _ ->
+        {:noreply, state}
     end
   end
 
@@ -774,9 +776,9 @@ defmodule SymphonyElixir.Orchestrator do
   defp input_required_blocker?(running_entry) when is_map(running_entry) do
     not Map.has_key?(running_entry, :worker_identity) and
       (Map.get(running_entry, :last_codex_event) in [:turn_input_required, :approval_required] or
-      not is_nil(input_required_completion_outcome(Map.get(running_entry, :completion))) or
-      codex_message_method(Map.get(running_entry, :last_codex_message)) ==
-        "mcpServer/elicitation/request")
+         not is_nil(input_required_completion_outcome(Map.get(running_entry, :completion))) or
+         codex_message_method(Map.get(running_entry, :last_codex_message)) ==
+           "mcpServer/elicitation/request")
   end
 
   defp input_required_blocker?(_running_entry), do: false
@@ -1883,15 +1885,4 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp running_seconds(_started_at, _now), do: 0
-
-  defp integer_like(value) when is_integer(value) and value >= 0, do: value
-
-  defp integer_like(value) when is_binary(value) do
-    case Integer.parse(String.trim(value)) do
-      {num, _} when num >= 0 -> num
-      _ -> nil
-    end
-  end
-
-  defp integer_like(_value), do: nil
 end
