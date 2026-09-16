@@ -874,7 +874,8 @@ Algorithm summary:
 1. Derive `workspace_key` using Section 4.2, including the stable original-identifier hash when
    sanitization changes the identifier.
 2. Compute workspace path under workspace root.
-3. Ensure the workspace path exists as a directory.
+3. Acquire exclusive cross-process ownership of the canonical workspace path before mutation, then
+   ensure the workspace path exists as a directory.
 4. Mark `created_now=true` only if the directory was created during this call; otherwise
    `created_now=false`.
 5. If `created_now=true`, run `after_create` hook if configured.
@@ -946,6 +947,19 @@ Invariant 3: Workspace key is sanitized.
 - Replace all other characters with `_`.
 - If replacement changes the identifier, append a stable original-identifier hash suffix with at
   least 64 bits of entropy so keys remain collision-resistant after sanitization.
+
+Invariant 4: Exactly one Symphony attempt may own a workspace across OS processes.
+
+- Acquire ownership before workspace creation, mutating lifecycle hooks, or coding-agent launch.
+- Retain ownership across all turns and `after_run`; workspace deletion also requires ownership.
+- A denied attempt MUST remain non-destructive and report the owner's issue identifier, canonical
+  workspace path, PID, host, orchestrator instance ID, and acquisition timestamp when available.
+- Use an OS-backed primitive with process-exit release semantics. Stale diagnostic metadata MUST
+  NOT prevent reacquisition or authorize a writer. Distinct workspace paths remain concurrent.
+- Surviving foreground commands MUST prevent takeover until they exit; resumed attempts acquire
+  ownership through the same boundary. Workflow reloads MUST NOT change an active attempt's path.
+- These are cooperative harness locks; lock-unaware processes and detached writers that discard
+  inherited lock descriptors are outside this contract.
 
 ## 10. Agent Runner Protocol (Coding Agent Integration)
 

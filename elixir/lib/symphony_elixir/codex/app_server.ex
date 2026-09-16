@@ -4,7 +4,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   """
 
   require Logger
-  alias SymphonyElixir.{Codex.DynamicTool, Config, PathSafety, SSH}
+  alias SymphonyElixir.{Codex.DynamicTool, Config, PathSafety, SSH, WorkspaceLock}
 
   @initialize_id 1
   @thread_start_id 2
@@ -202,6 +202,7 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp start_port(workspace, nil, dynamic_tool_binding) do
     executable = System.find_executable("bash")
+    launch_command = WorkspaceLock.command(workspace, nil, local_launch_command(dynamic_tool_binding))
 
     if is_nil(executable) do
       {:error, :bash_not_found}
@@ -213,7 +214,7 @@ defmodule SymphonyElixir.Codex.AppServer do
             :binary,
             :exit_status,
             :stderr_to_stdout,
-            args: [~c"-lc", String.to_charlist(local_launch_command(dynamic_tool_binding))],
+            args: [~c"-lc", String.to_charlist(launch_command)],
             cd: String.to_charlist(workspace),
             env: tracker_secret_port_env(dynamic_tool_binding),
             line: @port_line_bytes
@@ -225,7 +226,9 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp start_port(workspace, worker_host, dynamic_tool_binding) when is_binary(worker_host) do
-    remote_command = remote_launch_command(workspace, dynamic_tool_binding)
+    remote_command =
+      WorkspaceLock.command(workspace, worker_host, remote_launch_command(workspace, dynamic_tool_binding))
+
     SSH.start_port(worker_host, remote_command, line: @port_line_bytes)
   end
 

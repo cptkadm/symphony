@@ -25,7 +25,12 @@ defmodule SymphonyElixir.AgentRunner do
 
     Logger.info("Starting agent run for #{issue_context(issue)} worker_host=#{worker_host_for_log(worker_host)}")
 
-    case run_on_worker_host(issue, codex_update_recipient, opts, worker_host) do
+    result =
+      Workspace.with_workspace(issue, worker_host, fn workspace ->
+        run_on_worker_host(issue, codex_update_recipient, opts, worker_host, workspace)
+      end)
+
+    case result do
       :ok ->
         :ok
 
@@ -35,23 +40,16 @@ defmodule SymphonyElixir.AgentRunner do
     end
   end
 
-  defp run_on_worker_host(issue, codex_update_recipient, opts, worker_host) do
+  defp run_on_worker_host(issue, codex_update_recipient, opts, worker_host, workspace) do
     Logger.info("Starting worker attempt for #{issue_context(issue)} worker_host=#{worker_host_for_log(worker_host)}")
+    send_worker_runtime_info(codex_update_recipient, issue, worker_host, workspace)
 
-    case Workspace.create_for_issue(issue, worker_host) do
-      {:ok, workspace} ->
-        send_worker_runtime_info(codex_update_recipient, issue, worker_host, workspace)
-
-        try do
-          with :ok <- Workspace.run_before_run_hook(workspace, issue, worker_host) do
-            run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host)
-          end
-        after
-          Workspace.run_after_run_hook(workspace, issue, worker_host)
-        end
-
-      {:error, reason} ->
-        {:error, reason}
+    try do
+      with :ok <- Workspace.run_before_run_hook(workspace, issue, worker_host) do
+        run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host)
+      end
+    after
+      Workspace.run_after_run_hook(workspace, issue, worker_host)
     end
   end
 
