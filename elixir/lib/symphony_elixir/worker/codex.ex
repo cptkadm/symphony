@@ -5,7 +5,7 @@ defmodule SymphonyElixir.Worker.Codex do
   alias SymphonyElixir.Worker.{CodexTelemetry, Result}
 
   @impl true
-  def identity, do: %{provider: "openai", model: nil, harness: "codex-app-server"}
+  def identity, do: %{provider: "openai", model: nil, harness: "codex-app-server", protocol: "codex-app-server"}
 
   @impl true
   def capabilities, do: %{conversation: true, resume: false, usage: true, quota: true}

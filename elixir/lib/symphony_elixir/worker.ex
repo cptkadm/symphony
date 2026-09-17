@@ -25,8 +25,19 @@ defmodule SymphonyElixir.Worker do
           turn: pos_integer(),
           max_turns: pos_integer()
         }
-  @callback identity() :: %{provider: String.t(), model: String.t() | nil, harness: String.t()}
-  @callback capabilities() :: %{conversation: boolean(), resume: boolean(), usage: boolean(), quota: boolean()}
+  @callback identity() :: %{
+              optional(:protocol) => String.t(),
+              provider: String.t(),
+              model: String.t() | nil,
+              harness: String.t()
+            }
+  @callback capabilities() :: %{
+              optional(:acp) => boolean(),
+              conversation: boolean(),
+              resume: boolean(),
+              usage: boolean(),
+              quota: boolean()
+            }
   @callback start(context()) :: {:ok, term()} | {:error, Result.t()}
   @callback run(term(), context(), (map() -> term())) :: Result.t()
   @callback stop(term()) :: :ok
@@ -34,7 +45,40 @@ defmodule SymphonyElixir.Worker do
   @optional_callbacks resume: 2
 
   @spec adapter() :: module()
-  def adapter, do: Application.get_env(:symphony_elixir, :worker_adapter, Codex)
+  def adapter do
+    case Application.get_env(:symphony_elixir, :worker_adapter) do
+      nil -> adapter_from_config()
+      module when is_atom(module) -> module
+    end
+  end
+
+  defp adapter_from_config do
+    try do
+      case SymphonyElixir.Config.settings() do
+        {:ok, %{worker: %{adapter: adapter}}} when is_binary(adapter) ->
+          resolve_adapter_name(adapter)
+
+        {:ok, %{worker: %{kind: kind}}} when is_binary(kind) ->
+          resolve_adapter_name(kind)
+
+        _ ->
+          Codex
+      end
+    rescue
+      _ -> Codex
+    catch
+      :exit, _ -> Codex
+    end
+  end
+
+  @spec resolve_adapter_name(String.t() | atom()) :: module()
+  def resolve_adapter_name("openhands"), do: SymphonyElixir.Worker.OpenHands
+  def resolve_adapter_name(:openhands), do: SymphonyElixir.Worker.OpenHands
+  def resolve_adapter_name("acp"), do: SymphonyElixir.Worker.ACP
+  def resolve_adapter_name(:acp), do: SymphonyElixir.Worker.ACP
+  def resolve_adapter_name("codex"), do: SymphonyElixir.Worker.Codex
+  def resolve_adapter_name(:codex), do: SymphonyElixir.Worker.Codex
+  def resolve_adapter_name(_), do: Codex
 
   @spec start(module(), context()) :: {:ok, term()} | {:error, Result.t()}
   def start(adapter, context) do
@@ -49,7 +93,26 @@ defmodule SymphonyElixir.Worker do
 
   @spec run(module(), term(), context(), (map() -> term())) :: Result.t()
   def run(adapter, handle, context, on_update) do
-    adapter.run(handle, context, on_update) |> Result.normalize()
+    result = adapter.run(handle, context, on_update) |> Result.normalize()
+
+    case result.attribution do
+      nil ->
+        identity =
+          try do
+            adapter.identity()
+          rescue
+            _ -> nil
+          end
+
+        if is_map(identity) do
+          %{result | attribution: identity} |> Result.normalize()
+        else
+          result
+        end
+
+      _ ->
+        result
+    end
   rescue
     _ -> %Result{}
   end
