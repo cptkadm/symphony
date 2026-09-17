@@ -8,6 +8,7 @@ defmodule SymphonyElixir.Orchestrator do
   import Bitwise, only: [<<<: 2]
 
   alias SymphonyElixir.{AgentRunner, Config, StatusDashboard, Tracker, Workspace}
+  alias SymphonyElixir.Worker.Result
   alias SymphonyElixir.Tracker.Issue
 
   @continuation_retry_delay_ms 1_000
@@ -148,6 +149,39 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
+  def handle_info({:worker_update, issue_id, pid, %{event: _, timestamp: %DateTime{}} = update}, state) do
+    case state.running[issue_id] do
+      %{pid: ^pid} = entry ->
+        {entry, delta} = integrate_codex_update(entry, update)
+        state = state |> apply_codex_token_delta(delta) |> apply_codex_rate_limits(update)
+        {:noreply, %{state | running: Map.put(state.running, issue_id, entry)}}
+
+      _ ->
+        {:noreply, state}
+    end
+  end
+
+  def handle_info({:worker_result, issue_id, pid, result}, state) do
+    case state.running[issue_id] do
+      %{pid: ^pid} = entry ->
+        {:noreply, %{state | running: Map.put(state.running, issue_id, Map.put(entry, :worker_result, Result.normalize(result)))}}
+
+      _ ->
+        {:noreply, state}
+    end
+  end
+
+  def handle_info({:worker_identity, issue_id, pid, identity, capabilities}, state) do
+    case state.running[issue_id] do
+      %{pid: ^pid} = entry ->
+        entry = Map.merge(entry, %{worker_identity: identity, worker_capabilities: capabilities})
+        {:noreply, %{state | running: Map.put(state.running, issue_id, entry)}}
+
+      _ ->
+        {:noreply, state}
+    end
+  end
+
   def handle_info({:worker_runtime_info, issue_id, runtime_info}, %{running: running} = state)
       when is_binary(issue_id) and is_map(runtime_info) do
     case Map.get(running, issue_id) do
@@ -174,6 +208,7 @@ defmodule SymphonyElixir.Orchestrator do
         {:noreply, state}
 
       running_entry ->
+        update = SymphonyElixir.Worker.CodexTelemetry.normalize(update)
         {updated_running_entry, token_delta} = integrate_codex_update(running_entry, update)
 
         state =
@@ -204,6 +239,37 @@ defmodule SymphonyElixir.Orchestrator do
   def handle_info(msg, state) do
     Logger.debug("Orchestrator ignored message: #{inspect(msg)}")
     {:noreply, state}
+  end
+
+  defp handle_agent_down(reason, state, issue_id, %{worker_result: %Result{} = result} = entry, session_id) do
+    case result.class do
+      :success ->
+        # A report of success only schedules tracker revalidation; it never certifies or merges.
+        handle_agent_down(reason, state, issue_id, Map.drop(entry, [:worker_result, :last_codex_event]), session_id)
+
+      :rate_limited when is_nil(result.retry_at_ms) ->
+        block_issue_from_entry(state, issue_id, entry, "worker: rate_limited (retry time unknown)")
+
+      class when class in [:provider_capacity, :rate_limited] ->
+        schedule_issue_retry(state, issue_id, next_retry_attempt_from_running(entry), %{
+          identifier: entry.identifier,
+          issue_url: entry.issue.url,
+          error: "worker: #{class}",
+          worker_host: Map.get(entry, :worker_host),
+          workspace_path: Map.get(entry, :workspace_path),
+          retry_at_ms: result.retry_at_ms
+        })
+
+      :transport_failure ->
+        if failure_retry_limit_reached?(entry) do
+          block_issue_from_entry(state, issue_id, entry, "worker: transport_failure (retry exhausted)")
+        else
+          retry_agent_down(state, issue_id, entry, session_id, :transport_failure)
+        end
+
+      class ->
+        block_issue_from_entry(state, issue_id, entry, "worker: #{class}")
+    end
   end
 
   defp handle_agent_down(:normal, state, issue_id, running_entry, session_id) do
@@ -708,16 +774,18 @@ defmodule SymphonyElixir.Orchestrator do
   defp last_activity_timestamp(_running_entry), do: nil
 
   defp input_required_blocker?(running_entry) when is_map(running_entry) do
-    Map.get(running_entry, :last_codex_event) in [:turn_input_required, :approval_required] or
-      not is_nil(input_required_completion_outcome(Map.get(running_entry, :completion))) or
-      codex_message_method(Map.get(running_entry, :last_codex_message)) ==
-        "mcpServer/elicitation/request"
+    not Map.has_key?(running_entry, :worker_identity) and
+      (Map.get(running_entry, :last_codex_event) in [:turn_input_required, :approval_required] or
+         not is_nil(input_required_completion_outcome(Map.get(running_entry, :completion))) or
+         codex_message_method(Map.get(running_entry, :last_codex_message)) ==
+           "mcpServer/elicitation/request")
   end
 
   defp input_required_blocker?(_running_entry), do: false
 
   defp terminal_turn_failure_blocker?(running_entry) when is_map(running_entry) do
-    Map.get(running_entry, :last_codex_event) in [:turn_failed, :turn_cancelled]
+    not Map.has_key?(running_entry, :worker_identity) and
+      Map.get(running_entry, :last_codex_event) in [:turn_failed, :turn_cancelled]
   end
 
   defp terminal_turn_failure_blocker?(_running_entry), do: false
@@ -1302,10 +1370,11 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp retry_delay(attempt, metadata) when is_integer(attempt) and attempt > 0 and is_map(metadata) do
-    if metadata[:delay_type] == :continuation and attempt == 1 do
-      @continuation_retry_delay_ms
-    else
-      failure_retry_delay(attempt)
+    base = if metadata[:delay_type] == :continuation and attempt == 1, do: @continuation_retry_delay_ms, else: failure_retry_delay(attempt)
+
+    case metadata[:retry_at_ms] do
+      retry_at when is_integer(retry_at) -> max(base, retry_at - System.system_time(:millisecond))
+      _ -> base
     end
   end
 
@@ -1730,7 +1799,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp apply_codex_token_delta(state, _token_delta), do: state
 
   defp apply_codex_rate_limits(%State{} = state, update) when is_map(update) do
-    case extract_rate_limits(update) do
+    case update[:worker_quota] do
       %{} = rate_limits ->
         %{state | codex_rate_limits: rate_limits}
 
@@ -1759,7 +1828,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp extract_token_delta(running_entry, %{event: _, timestamp: _} = update) do
     running_entry = running_entry || %{}
-    usage = extract_token_usage(update)
+    usage = Map.get(update, :worker_usage, %{})
 
     {
       compute_token_delta(
@@ -1795,7 +1864,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp compute_token_delta(running_entry, token_key, usage, reported_key) do
-    next_total = get_token_usage(usage, token_key)
+    next_total = Map.get(usage, token_key)
     prev_reported = Map.get(running_entry, reported_key, 0)
 
     delta =
@@ -1811,252 +1880,9 @@ defmodule SymphonyElixir.Orchestrator do
     }
   end
 
-  defp extract_token_usage(update) do
-    payloads = [
-      update[:usage],
-      Map.get(update, "usage"),
-      Map.get(update, :usage),
-      update[:payload],
-      Map.get(update, "payload"),
-      update
-    ]
-
-    Enum.find_value(payloads, &absolute_token_usage_from_payload/1) ||
-      Enum.find_value(payloads, &turn_completed_usage_from_payload/1) ||
-      %{}
-  end
-
-  defp extract_rate_limits(update) do
-    rate_limits_from_payload(update[:rate_limits]) ||
-      rate_limits_from_payload(Map.get(update, "rate_limits")) ||
-      rate_limits_from_payload(Map.get(update, :rate_limits)) ||
-      rate_limits_from_payload(update[:payload]) ||
-      rate_limits_from_payload(Map.get(update, "payload")) ||
-      rate_limits_from_payload(update)
-  end
-
-  defp absolute_token_usage_from_payload(payload) when is_map(payload) do
-    absolute_paths = [
-      ["params", "msg", "payload", "info", "total_token_usage"],
-      [:params, :msg, :payload, :info, :total_token_usage],
-      ["params", "msg", "info", "total_token_usage"],
-      [:params, :msg, :info, :total_token_usage],
-      ["params", "tokenUsage", "total"],
-      [:params, :tokenUsage, :total],
-      ["tokenUsage", "total"],
-      [:tokenUsage, :total]
-    ]
-
-    explicit_map_at_paths(payload, absolute_paths)
-  end
-
-  defp absolute_token_usage_from_payload(_payload), do: nil
-
-  defp turn_completed_usage_from_payload(payload) when is_map(payload) do
-    method = Map.get(payload, "method") || Map.get(payload, :method)
-
-    if method in ["turn/completed", :turn_completed] do
-      direct =
-        Map.get(payload, "usage") ||
-          Map.get(payload, :usage) ||
-          map_at_path(payload, ["params", "usage"]) ||
-          map_at_path(payload, [:params, :usage])
-
-      if is_map(direct) and integer_token_map?(direct), do: direct
-    end
-  end
-
-  defp turn_completed_usage_from_payload(_payload), do: nil
-
-  defp rate_limits_from_payload(payload) when is_map(payload) do
-    direct = Map.get(payload, "rate_limits") || Map.get(payload, :rate_limits)
-
-    cond do
-      rate_limits_map?(direct) ->
-        direct
-
-      rate_limits_map?(payload) ->
-        payload
-
-      true ->
-        rate_limit_payloads(payload)
-    end
-  end
-
-  defp rate_limits_from_payload(payload) when is_list(payload) do
-    rate_limit_payloads(payload)
-  end
-
-  defp rate_limits_from_payload(_payload), do: nil
-
-  defp rate_limit_payloads(payload) when is_map(payload) do
-    Map.values(payload)
-    |> Enum.reduce_while(nil, fn
-      value, nil ->
-        case rate_limits_from_payload(value) do
-          nil -> {:cont, nil}
-          rate_limits -> {:halt, rate_limits}
-        end
-
-      _value, result ->
-        {:halt, result}
-    end)
-  end
-
-  defp rate_limit_payloads(payload) when is_list(payload) do
-    payload
-    |> Enum.reduce_while(nil, fn
-      value, nil ->
-        case rate_limits_from_payload(value) do
-          nil -> {:cont, nil}
-          rate_limits -> {:halt, rate_limits}
-        end
-
-      _value, result ->
-        {:halt, result}
-    end)
-  end
-
-  defp rate_limits_map?(payload) when is_map(payload) do
-    limit_id =
-      Map.get(payload, "limit_id") ||
-        Map.get(payload, :limit_id) ||
-        Map.get(payload, "limit_name") ||
-        Map.get(payload, :limit_name)
-
-    has_buckets =
-      Enum.any?(
-        ["primary", :primary, "secondary", :secondary, "credits", :credits],
-        &Map.has_key?(payload, &1)
-      )
-
-    !is_nil(limit_id) and has_buckets
-  end
-
-  defp rate_limits_map?(_payload), do: false
-
-  defp explicit_map_at_paths(payload, paths) when is_map(payload) and is_list(paths) do
-    Enum.find_value(paths, fn path ->
-      value = map_at_path(payload, path)
-
-      if is_map(value) and integer_token_map?(value), do: value
-    end)
-  end
-
-  defp explicit_map_at_paths(_payload, _paths), do: nil
-
-  defp map_at_path(payload, path) when is_map(payload) and is_list(path) do
-    Enum.reduce_while(path, payload, fn key, acc ->
-      if is_map(acc) and Map.has_key?(acc, key) do
-        {:cont, Map.get(acc, key)}
-      else
-        {:halt, nil}
-      end
-    end)
-  end
-
-  defp map_at_path(_payload, _path), do: nil
-
-  defp integer_token_map?(payload) do
-    token_fields = [
-      :input_tokens,
-      :output_tokens,
-      :total_tokens,
-      :prompt_tokens,
-      :completion_tokens,
-      :inputTokens,
-      :outputTokens,
-      :totalTokens,
-      :promptTokens,
-      :completionTokens,
-      "input_tokens",
-      "output_tokens",
-      "total_tokens",
-      "prompt_tokens",
-      "completion_tokens",
-      "inputTokens",
-      "outputTokens",
-      "totalTokens",
-      "promptTokens",
-      "completionTokens"
-    ]
-
-    token_fields
-    |> Enum.any?(fn field ->
-      value = payload_get(payload, field)
-      !is_nil(integer_like(value))
-    end)
-  end
-
-  defp get_token_usage(usage, :input),
-    do:
-      payload_get(usage, [
-        "input_tokens",
-        "prompt_tokens",
-        :input_tokens,
-        :prompt_tokens,
-        :input,
-        "promptTokens",
-        :promptTokens,
-        "inputTokens",
-        :inputTokens
-      ])
-
-  defp get_token_usage(usage, :output),
-    do:
-      payload_get(usage, [
-        "output_tokens",
-        "completion_tokens",
-        :output_tokens,
-        :completion_tokens,
-        :output,
-        :completion,
-        "outputTokens",
-        :outputTokens,
-        "completionTokens",
-        :completionTokens
-      ])
-
-  defp get_token_usage(usage, :total),
-    do:
-      payload_get(usage, [
-        "total_tokens",
-        "total",
-        :total_tokens,
-        :total,
-        "totalTokens",
-        :totalTokens
-      ])
-
-  defp payload_get(payload, fields) when is_list(fields) do
-    Enum.find_value(fields, fn field -> map_integer_value(payload, field) end)
-  end
-
-  defp payload_get(payload, field), do: map_integer_value(payload, field)
-
-  defp map_integer_value(payload, field) do
-    if is_map(payload) do
-      value = Map.get(payload, field)
-      integer_like(value)
-    else
-      nil
-    end
-  end
-
   defp running_seconds(%DateTime{} = started_at, %DateTime{} = now) do
     max(0, DateTime.diff(now, started_at, :second))
   end
 
   defp running_seconds(_started_at, _now), do: 0
-
-  defp integer_like(value) when is_integer(value) and value >= 0, do: value
-
-  defp integer_like(value) when is_binary(value) do
-    case Integer.parse(String.trim(value)) do
-      {num, _} when num >= 0 -> num
-      _ -> nil
-    end
-  end
-
-  defp integer_like(_value), do: nil
 end
