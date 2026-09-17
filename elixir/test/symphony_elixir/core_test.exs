@@ -1693,7 +1693,7 @@ defmodule SymphonyElixir.CoreTest do
                  issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end
                )
 
-      assert_receive {:codex_worker_update, "issue-live-updates",
+      assert_receive {:worker_update, "issue-live-updates", _,
                       %{
                         event: :session_started,
                         timestamp: %DateTime{},
