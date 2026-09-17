@@ -4,9 +4,9 @@ defmodule SymphonyElixir.AgentRunner do
   """
 
   require Logger
-  alias SymphonyElixir.Worker.Result
   alias SymphonyElixir.{Config, PromptBuilder, Tracker, Worker, Workspace}
   alias SymphonyElixir.Tracker.Issue
+  alias SymphonyElixir.Worker.Result
 
   @type worker_host :: String.t() | nil
 
@@ -144,7 +144,8 @@ defmodule SymphonyElixir.AgentRunner do
       {:continue, issue} when context.turn < context.max_turns ->
         turn = context.turn + 1
         prompt_turn = if adapter.capabilities().conversation, do: turn, else: 1
-        next = %{context | issue: issue, turn: turn, prompt: build_turn_prompt(issue, opts, prompt_turn, context.max_turns)}
+        prompt = build_turn_prompt(issue, opts, prompt_turn, context.max_turns)
+        next = %{context | issue: issue, turn: turn, prompt: prompt}
         do_run_worker_turns(adapter, handle, next, recipient, opts, fetcher)
 
       {:error, reason} ->

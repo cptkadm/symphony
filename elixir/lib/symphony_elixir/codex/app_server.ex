@@ -418,38 +418,40 @@ defmodule SymphonyElixir.Codex.AppServer do
     payload_string = to_string(data)
 
     case Jason.decode(payload_string) do
-      {:ok, %{"method" => "turn/completed"} = payload} ->
-        case turn_completion_status(payload) do
-          "failed" ->
-            emit_turn_event(
-              on_message,
-              :turn_failed,
-              payload,
-              payload_string,
-              port,
-              Map.get(payload, "params")
-            )
+      {:ok, payload} ->
+        dispatch_incoming_payload(
+          port,
+          on_message,
+          payload,
+          payload_string,
+          timeout_ms,
+          tool_executor,
+          auto_approve_requests
+        )
 
-            {:error, {:turn_failed, Map.get(payload, "params")}}
+      {:error, _reason} ->
+        handle_malformed_incoming(
+          port,
+          on_message,
+          payload_string,
+          timeout_ms,
+          tool_executor,
+          auto_approve_requests
+        )
+    end
+  end
 
-          "interrupted" ->
-            emit_turn_event(
-              on_message,
-              :turn_cancelled,
-              payload,
-              payload_string,
-              port,
-              Map.get(payload, "params")
-            )
-
-            {:error, {:turn_cancelled, Map.get(payload, "params")}}
-
-          _ ->
-            emit_turn_event(on_message, :turn_completed, payload, payload_string, port, payload)
-            {:ok, :turn_completed}
-        end
-
-      {:ok, %{"method" => "turn/failed", "params" => _} = payload} ->
+  defp dispatch_incoming_payload(
+         port,
+         on_message,
+         %{"method" => "turn/completed"} = payload,
+         payload_string,
+         _timeout_ms,
+         _tool_executor,
+         _auto_approve
+       ) do
+    case turn_completion_status(payload) do
+      "failed" ->
         emit_turn_event(
           on_message,
           :turn_failed,
@@ -461,7 +463,7 @@ defmodule SymphonyElixir.Codex.AppServer do
 
         {:error, {:turn_failed, Map.get(payload, "params")}}
 
-      {:ok, %{"method" => "turn/cancelled", "params" => _} = payload} ->
+      "interrupted" ->
         emit_turn_event(
           on_message,
           :turn_cancelled,
@@ -473,49 +475,121 @@ defmodule SymphonyElixir.Codex.AppServer do
 
         {:error, {:turn_cancelled, Map.get(payload, "params")}}
 
-      {:ok, %{"method" => method} = payload}
-      when is_binary(method) ->
-        handle_turn_method(
-          port,
-          on_message,
-          payload,
-          payload_string,
-          method,
-          timeout_ms,
-          tool_executor,
-          auto_approve_requests
-        )
-
-      {:ok, payload} ->
-        emit_message(
-          on_message,
-          :other_message,
-          %{
-            payload: payload,
-            raw: payload_string
-          },
-          metadata_from_message(port, payload)
-        )
-
-        receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests)
-
-      {:error, _reason} ->
-        log_non_json_stream_line(payload_string, "turn stream")
-
-        if protocol_message_candidate?(payload_string) do
-          emit_message(
-            on_message,
-            :malformed,
-            %{
-              payload: payload_string,
-              raw: payload_string
-            },
-            metadata_from_message(port, %{raw: payload_string})
-          )
-        end
-
-        receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests)
+      _ ->
+        emit_turn_event(on_message, :turn_completed, payload, payload_string, port, payload)
+        {:ok, :turn_completed}
     end
+  end
+
+  defp dispatch_incoming_payload(
+         port,
+         on_message,
+         %{"method" => "turn/failed"} = payload,
+         payload_string,
+         _timeout_ms,
+         _tool_executor,
+         _auto_approve
+       ) do
+    emit_turn_event(
+      on_message,
+      :turn_failed,
+      payload,
+      payload_string,
+      port,
+      Map.get(payload, "params")
+    )
+
+    {:error, {:turn_failed, Map.get(payload, "params")}}
+  end
+
+  defp dispatch_incoming_payload(
+         port,
+         on_message,
+         %{"method" => "turn/cancelled"} = payload,
+         payload_string,
+         _timeout_ms,
+         _tool_executor,
+         _auto_approve
+       ) do
+    emit_turn_event(
+      on_message,
+      :turn_cancelled,
+      payload,
+      payload_string,
+      port,
+      Map.get(payload, "params")
+    )
+
+    {:error, {:turn_cancelled, Map.get(payload, "params")}}
+  end
+
+  defp dispatch_incoming_payload(
+         port,
+         on_message,
+         %{"method" => method} = payload,
+         payload_string,
+         timeout_ms,
+         tool_executor,
+         auto_approve_requests
+       )
+       when is_binary(method) do
+    handle_turn_method(
+      port,
+      on_message,
+      payload,
+      payload_string,
+      method,
+      timeout_ms,
+      tool_executor,
+      auto_approve_requests
+    )
+  end
+
+  defp dispatch_incoming_payload(
+         port,
+         on_message,
+         payload,
+         payload_string,
+         timeout_ms,
+         tool_executor,
+         auto_approve_requests
+       ) do
+    emit_message(
+      on_message,
+      :other_message,
+      %{
+        payload: payload,
+        raw: payload_string
+      },
+      metadata_from_message(port, payload)
+    )
+
+    receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests)
+  end
+
+  defp handle_malformed_incoming(
+         port,
+         on_message,
+         payload_string,
+         timeout_ms,
+         tool_executor,
+         auto_approve_requests
+       ) do
+    log_non_json_stream_line(payload_string, "turn stream")
+
+    if protocol_message_candidate?(payload_string) do
+      emit_message(
+        on_message,
+        :malformed,
+        %{
+          payload: payload_string,
+          raw: payload_string
+        },
+        metadata_from_message(port, %{raw: payload_string})
+      )
+    end
+
+    receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests)
   end
 
   defp turn_completion_status(payload) when is_map(payload) do
@@ -524,8 +598,6 @@ defmodule SymphonyElixir.Codex.AppServer do
       _ -> nil
     end
   end
-
-  defp turn_completion_status(_payload), do: nil
 
   defp emit_turn_event(on_message, event, payload, payload_string, port, payload_details) do
     emit_message(
