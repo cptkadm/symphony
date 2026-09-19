@@ -76,26 +76,7 @@ defmodule SymphonyElixir.Codex.WorkspaceGit do
     with {:ok, branch} <- branch_argument(arguments),
          :ok <- validate_branch(workspace, branch),
          {:ok, current} <- current_branch(workspace) do
-      cond do
-        current == branch ->
-          {:ok, %{"operation" => "ensure_branch", "branch" => branch, "changed" => false}}
-
-        local_branch?(workspace, branch) ->
-          with {:ok, _output} <- git(workspace, @no_hooks ++ ["switch", branch]) do
-            {:ok, %{"operation" => "ensure_branch", "branch" => branch, "changed" => true}}
-          end
-
-        remote_tracking_branch?(workspace, branch) ->
-          with {:ok, _output} <-
-                 git(workspace, @no_hooks ++ ["switch", "--track", "-c", branch, "origin/#{branch}"]) do
-            {:ok, %{"operation" => "ensure_branch", "branch" => branch, "changed" => true}}
-          end
-
-        true ->
-          with {:ok, _output} <- git(workspace, @no_hooks ++ ["switch", "-c", branch]) do
-            {:ok, %{"operation" => "ensure_branch", "branch" => branch, "changed" => true}}
-          end
-      end
+      ensure_target_branch(workspace, branch, current)
     end
   end
 
@@ -139,6 +120,28 @@ defmodule SymphonyElixir.Codex.WorkspaceGit do
   end
 
   defp execute_operation(_operation, _arguments, _workspace), do: {:error, :invalid_operation}
+
+  defp ensure_target_branch(_workspace, branch, branch) do
+    {:ok, %{"operation" => "ensure_branch", "branch" => branch, "changed" => false}}
+  end
+
+  defp ensure_target_branch(workspace, branch, _current) do
+    switch_args =
+      cond do
+        local_branch?(workspace, branch) ->
+          ["switch", branch]
+
+        remote_tracking_branch?(workspace, branch) ->
+          ["switch", "--track", "-c", branch, "origin/#{branch}"]
+
+        true ->
+          ["switch", "-c", branch]
+      end
+
+    with {:ok, _output} <- git(workspace, @no_hooks ++ switch_args) do
+      {:ok, %{"operation" => "ensure_branch", "branch" => branch, "changed" => true}}
+    end
+  end
 
   defp issue_from_opts(opts) do
     case Keyword.get(opts, :issue) do
@@ -330,7 +333,6 @@ defmodule SymphonyElixir.Codex.WorkspaceGit do
   defp error_payload(:default_branch_push_forbidden), do: %{"message" => "`workspace_git` refuses to push the repository default branch."}
   defp error_payload({:git_failed, status, output}), do: %{"message" => "Git command failed.", "status" => status, "output" => output}
   defp error_payload({:git_unavailable, reason}), do: %{"message" => "Git executable is unavailable.", "reason" => reason}
-  defp error_payload(reason), do: %{"message" => "Workspace Git operation failed.", "reason" => inspect(reason)}
 
   defp truncate(output) when is_binary(output) and byte_size(output) <= @max_output_bytes, do: output
   defp truncate(output) when is_binary(output), do: binary_part(output, 0, @max_output_bytes) <> "... (truncated)"

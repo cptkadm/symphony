@@ -8,8 +8,9 @@ defmodule SymphonyElixir.Orchestrator do
   import Bitwise, only: [<<<: 2]
 
   alias SymphonyElixir.{AgentRunner, Config, StatusDashboard, Tracker, Workspace}
-  alias SymphonyElixir.Worker.Result
   alias SymphonyElixir.Tracker.Issue
+  alias SymphonyElixir.Worker.CodexTelemetry
+  alias SymphonyElixir.Worker.Result
 
   @continuation_retry_delay_ms 1_000
   @failure_retry_base_ms 10_000
@@ -208,7 +209,7 @@ defmodule SymphonyElixir.Orchestrator do
         {:noreply, state}
 
       running_entry ->
-        update = SymphonyElixir.Worker.CodexTelemetry.normalize(update)
+        update = CodexTelemetry.normalize(update)
         {updated_running_entry, token_delta} = integrate_codex_update(running_entry, update)
 
         state =
@@ -797,11 +798,9 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp codex_transient_retry_limit_reached?(_running_entry), do: false
 
-  defp failure_retry_limit_reached?(running_entry) when is_map(running_entry) do
+  defp failure_retry_limit_reached?(running_entry) do
     Map.get(running_entry, :retry_attempt, 0) >= @max_failure_retry_attempts
   end
-
-  defp failure_retry_limit_reached?(_running_entry), do: false
 
   defp input_required_completion_outcome(completion) when is_map(completion) do
     outcome = Map.get(completion, :outcome) || Map.get(completion, "outcome")
@@ -1370,7 +1369,12 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp retry_delay(attempt, metadata) when is_integer(attempt) and attempt > 0 and is_map(metadata) do
-    base = if metadata[:delay_type] == :continuation and attempt == 1, do: @continuation_retry_delay_ms, else: failure_retry_delay(attempt)
+    base =
+      if metadata[:delay_type] == :continuation and attempt == 1 do
+        @continuation_retry_delay_ms
+      else
+        failure_retry_delay(attempt)
+      end
 
     case metadata[:retry_at_ms] do
       retry_at when is_integer(retry_at) -> max(base, retry_at - System.system_time(:millisecond))

@@ -5,7 +5,17 @@ defmodule SymphonyElixir.Worker.Result do
   Raw provider payloads and credentials must not be included.
   """
 
-  @classes [:success, :implementation_failure, :provider_capacity, :rate_limited, :authentication_failure, :transport_failure, :input_required, :cancelled, :unknown_failure]
+  @classes [
+    :success,
+    :implementation_failure,
+    :provider_capacity,
+    :rate_limited,
+    :authentication_failure,
+    :transport_failure,
+    :input_required,
+    :cancelled,
+    :unknown_failure
+  ]
   defstruct class: :unknown_failure, retry_at_ms: nil, session_id: nil, usage: nil, quota: nil
 
   @type t :: %__MODULE__{
@@ -17,11 +27,35 @@ defmodule SymphonyElixir.Worker.Result do
         }
 
   @spec normalize(term()) :: t()
-  def normalize(%__MODULE__{class: class, retry_at_ms: retry, session_id: session, usage: usage, quota: quota} = result)
-      when class in @classes and (is_nil(retry) or (is_integer(retry) and retry >= 0)) and
-             (is_nil(session) or is_binary(session)) and (is_nil(usage) or is_map(usage)) and
-             (is_nil(quota) or is_map(quota)),
-      do: result
+  def normalize(%__MODULE__{} = result) do
+    if valid_result?(result) do
+      result
+    else
+      %__MODULE__{}
+    end
+  end
 
   def normalize(_), do: %__MODULE__{}
+
+  defp valid_result?(%__MODULE__{
+         class: class,
+         retry_at_ms: retry,
+         session_id: session,
+         usage: usage,
+         quota: quota
+       }) do
+    valid_class?(class) and valid_retry?(retry) and valid_session?(session) and valid_map?(usage) and
+      valid_map?(quota)
+  end
+
+  defp valid_class?(class), do: class in @classes
+
+  defp valid_retry?(nil), do: true
+  defp valid_retry?(retry), do: is_integer(retry) and retry >= 0
+
+  defp valid_session?(nil), do: true
+  defp valid_session?(session), do: is_binary(session)
+
+  defp valid_map?(nil), do: true
+  defp valid_map?(m), do: is_map(m)
 end

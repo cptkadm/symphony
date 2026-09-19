@@ -41,7 +41,7 @@ defmodule SymphonyElixir.Worker.Codex do
   def classify(reason) when reason in [:turn_timeout, :response_timeout], do: %Result{class: :transport_failure}
   def classify(_), do: %Result{}
 
-  defp error_class(%{"code" => -32001}, _), do: :provider_capacity
+  defp error_class(%{"code" => -32_001}, _), do: :provider_capacity
   defp error_class(%{"error" => error}, kind), do: error_class(error, kind)
   defp error_class(%{"turn" => %{"error" => error}}, kind), do: error_class(error, kind)
   defp error_class(%{"codexErrorInfo" => info}, kind), do: info_class(info, kind)
