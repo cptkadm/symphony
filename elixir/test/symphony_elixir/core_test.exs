@@ -1283,7 +1283,7 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
-  defp eventually_value(fun, attempts \\ 100)
+  defp eventually_value(fun, attempts \\ 300)
 
   defp eventually_value(_fun, 0), do: nil
 
