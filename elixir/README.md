@@ -273,6 +273,10 @@ codex:
   `body`; Symphony executes it host-side with the session-bound token, removes configured tracker
   credentials and provider authentication aliases from the Codex child, and leaves raw tool access
   limited by that token's GitHub permissions.
+- Fork repository CI settings: On GitHub repository forks, GitHub Actions may be disabled by default.
+  To ensure workflow runs and status checks trigger for pull requests and pushes on a fork, an operator must set
+  **Settings → Actions → General → Actions permissions** to "Allow all actions and reusable workflows" and ensure
+  pull request workflows are allowed to run.
 
 ### Jira Cloud adapter
 

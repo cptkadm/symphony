@@ -178,7 +178,12 @@ defmodule SymphonyElixir.WorkspaceLock do
   end
 
   defp close_port(port) do
-    if Port.info(port), do: Port.close(port)
+    try do
+      if Port.info(port), do: Port.close(port)
+    catch
+      :error, :badarg -> :ok
+    end
+
     :ok
   end
 
